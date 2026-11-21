@@ -1,0 +1,73 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack sources (if uploaded as one zip)
+        run: |
+          if [ -f wave-ios-src.zip ]; then unzip -q -o wave-ios-src.zip; fi
+          ls
+
+      - name: Rust for iOS
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-apple-ios
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ios-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build Rust core (static library)
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        run: |
+          cargo rustc -p wave-core --lib --release --target aarch64-apple-ios --crate-type staticlib
+          ls -la target/aarch64-apple-ios/release/libwavenode.a
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd ios && xcodegen generate
+
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild -project ios/Wave.xcodeproj -scheme Wave -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tail -n 80
+          test -d build/Build/Products/Release-iphoneos/Wave.app
+
+      - name: Package IPA
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Wave.app Payload/
+          zip -qry Wave.ipa Payload
+          ls -la Wave.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wave-ipa
+          path: Wave.ipa
+
+      - name: Publish release (download from iPhone)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" Wave.ipa \
+            --title "Wave iOS (build ${{ github.run_number }})" \
+            --notes "Unsigned IPA — install with AltStore / SideStore." --latest
